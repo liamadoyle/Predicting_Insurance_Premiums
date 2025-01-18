@@ -1,0 +1,509 @@
+---
+title: "Predicting Insurance Premiums"
+clean: true
+author: "Liam A. Doyle"
+format:
+  html:
+    theme: flatly
+    code-fold: true
+    toc: true
+    toc-depth: 2
+embed-resources: true
+---
+
+# Introduction
+
+This project involves the prediction of insurance premiums using several machine learning models. The primary objective of the project was to generate a model that outperformed a null model (i.e., the mean) in predicting `premium_amount`.
+
+## Dataset
+
+The dataset includes both continuous (e.g., `annual_income`) and categorical (e.g., `gender`) features in order to predict a continuous outcome (i.e., `premium_amount`). This dataset was retrieved from [Kaggle](https://www.kaggle.com/competitions/playground-series-s4e12/overview). In order to keep the dataset manageable for my computing resources, a random sample of 5,000 observations was drawn from the total dataset (1,200,000 observations).
+
+# Importing Packages
+
+The following packages were used for this project:
+
+-   `tidyverse`
+-   `janitor`
+-   `DT`
+-   `skimr`
+-   `lubridate`
+-   `tidymodels`
+-   `glmnet`
+-   `ranger`
+-   `xgboost`
+- `doParallel`
+- `finetune`
+- `DALEXtra`
+
+```{r library, warning=FALSE, message=FALSE}
+library(tidyverse) # for data manipulation
+library(janitor) # for cleaning column names
+library(DT) # for viewing data interactively
+library(skimr) # for generating summary statistics
+library(lubridate) # for working with date-time data
+library(tidymodels) # for data pre-processing, feature engineering, and modelling
+library(glmnet) # for elastic net regression
+library(ranger) # for random forest models
+library(xgboost) # for eXtreme gradient boosting model
+library(doParallel) # for parallel processing
+library(finetune) # for grid searching via racing method
+library(DALEXtra) # for feature importance
+
+options (scipen = 999) # disable scientific notation
+```
+
+# Importing Data
+
+```{r data, warning=FALSE, message=FALSE}
+set.seed(123) # setting seed for reproducibility
+
+train <- read_csv("train.csv")
+data <- train %>%
+  slice_sample(n = 5000) %>% # randomly sampling 5000 observations
+  clean_names() %>% # using janitor to convert names to snakecase
+  mutate(across(where(is.character), ~as.factor(.x))) # changing character columns to factors
+
+datatable(head(data, 10)) # using datatable to view the data structure
+```
+
+# Splitting Data
+
+Prior to splitting the data, the outcome variable (`premium_amount`) was visualized using a histogram to ensure that simple random sampling would be appropriate.
+
+```{r histogram premium_amount}
+ggplot(data, aes(x = premium_amount)) +
+  geom_histogram(bins = 20, fill = "grey", color = "black") +
+  theme_minimal()
+```
+
+The data was split into a training and testing set using `rsample`. A 75/25 division was used. Given the fact that the distribution of `premium_amount` was right-skewed, stratified random sampling was used to ensure that the distribution was preserved.
+
+```{r split}
+set.seed(123)
+
+data_split <- initial_split(data, strata = premium_amount) # creating rsplit object
+
+train <- training(data_split) # extracting dfs for training and testing data
+test <- testing(data_split)
+```
+
+# Exploratory Data Analysis
+
+## Summary Statistics
+
+To familiarize myself with the data, common summary statistics were generated using `skimr`.
+
+```{r summary, skimr_digits = 2}
+skim(train) # examining summary statistics for data using `skimr`
+```
+
+## Correlations
+
+A correlation matrix was generated to examine the correlations between the numeric variables in the dataset. This was done to better understand the data and determine if any features were highly associated with one another.
+
+```{r correlations}
+train_numeric <- train %>%
+  select(where(is.numeric), -id) # select numeric variables
+
+cor_matrix <- round(cor(train_numeric, use = "pairwise.complete.obs"), 3)
+
+upper<-cor_matrix 
+upper[upper.tri(cor_matrix)] <- ""
+upper <- as.data.frame(upper) # create APA-style correlation matrix
+
+datatable(upper)
+```
+
+## Visualizations
+
+### Histograms of Continuous Variables
+
+A series of histograms were generated to understand the distribution of the continuous variables in the dataset.
+
+```{r histograms continuous, warning=FALSE, message=FALSE}
+continuous_vars <- c(
+  "age",
+  "annual_income",
+  "health_score",
+  "credit_score",
+  "premium_amount"
+)
+
+continuous_histograms <- lapply(continuous_vars, function(var) {
+  ggplot(train, aes(x = !!sym(var))) +
+    geom_histogram(fill = "tan",
+                   color = "black",
+                   alpha = 0.7) +
+    geom_vline(aes(xintercept = mean(!!sym(var), na.rm = TRUE)),
+               linewidth = 1.5,
+               linetype = "dotdash",
+               color = "darkgreen") +
+    theme_minimal() +
+    labs(
+      title = paste("Histogram of", var),
+      caption = str_c("Mean: ", round(mean(train[[var]], na.rm = TRUE), 2))
+    )
+})
+
+print(continuous_histograms)              
+```
+
+### Box Plots of Continuous Variables
+
+Similarly, a series of box plots were generated to visualize key aspects of the distribution of the continuous variables.
+
+```{r box plots continuous, warning=FALSE, message=FALSE}
+continuous_boxplots <- lapply(continuous_vars, function(var) {
+  ggplot(train, aes(y = !!sym(var))) +
+    geom_boxplot(fill = "tan",
+                 color = "black",
+                 outlier.colour = "darkred") +
+    theme_minimal() +
+    labs(
+      title = paste("Box Plot of", var)
+    )
+})
+
+print(continuous_boxplots) 
+```
+
+### Bar Plots of Nominal Variables
+
+Afterwards, bar plots were generated to understand the frequency of the nominal variables in the data.
+
+```{r bar plots nominal, warning=FALSE, message=FALSE}
+nominal_vars <- c(
+  "gender",
+  "marital_status",
+  "education_level",
+  "occupation",
+  "location",
+  "policy_type",
+  "customer_feedback",
+  "smoking_status",
+  "exercise_frequency",
+  "property_type"
+)
+
+nominal_plots <- lapply(nominal_vars, function(var) {
+  ggplot(train, aes(x = fct_infreq(!!sym(var)),
+                    fill = !!sym(var))) +
+    geom_bar(color = "black", show.legend = FALSE) +
+    theme_minimal() +
+    labs(
+      title = paste("Bar Plot of", var),
+      x = var
+    )
+})
+
+print(nominal_plots)
+```
+
+### Bar Plots of Ordinal Variables
+
+Bar plots were also used to understand the frequency of the ordinal variables in the dataset.
+
+```{r bar plots ordinal, warning=FALSE, message=FALSE}
+ordinal_vars <- c(
+"number_of_dependents",
+"previous_claims",
+"vehicle_age",
+"insurance_duration"
+)
+
+ordinal_plots <- lapply(ordinal_vars, function(var) {
+  ggplot(train, aes(x = !!sym(var))) +
+    geom_bar(fill = "tan", color = "black") +
+    theme_minimal() +
+    labs(
+      title = paste("Bar Plot of", var),
+      x = var
+    )
+})
+
+print(ordinal_plots)
+```
+
+# Data Preprocessing and Feature Engineering
+
+## Creating `tidymodels` Recipes
+
+To begin with, a `tidymodels` recipe was created to handle data preprocessing and feature engineering. 
+
+As the `policy_start_date` feature was not usable in its current state, information was extracted from it to create several variables (e.g., `policy_year`, `policy_month`, `policy_weekday`). In addition, a numeric variable called `days_since_start` was generated in order to track the number of days that had elapsed between the `policy_start_date` of a given observation and the earliest `policy_start_date` in the dataset. This was done in hopes of capturing any kind of time-based trend in premium amounts.
+
+To handle missing continuous data, the median was imputed for all predictors. For nominal/ordinal predictors, the mode was imputed. Note: there were no missing data points in the target variable.
+
+As `annual_income` and `premium_amount` were right-skewed, a log10 transformation was applied to achieve greater normality and stabilize the variance in their distributions. This also tends to help reduce the influence of outliers. Log10 transformations also tend to be more interpretable in some contexts (such as income), as they emphasize relative/proportional (vs. absolute) differences that tend to be more understandable in economic contexts.
+
+Afterwards, the numeric features were normalized using the `step_normalize` function. This ensured that all numeric features were centered (i.e., have a mean of zero and a standard deviation of 1) and placed all numeric features on the same scale. Normalization can be useful for a number of reasons:
+
+- It can improve convergence in some ML models;
+- It may help ensure that regularization techniques (e.g., L1, L2) are unbiased (i.e., do not unduly certain features due to range);
+- It can facilitate the interpretation of features in models that produce coefficients
+
+The nominal variables in the dataset were dummy-coded. This ensured that these variables were correctly structured for both tree-based and regression-based models.
+
+Lastly, some tidying steps were incorporated into the recipe. This included 
+
+- removing features with near-zero variance or zero variance (see [here](https://recipes.tidymodels.org/reference/step_nzv.html) for details);
+- removing the `id` and `policy_start_date` features, which cannot be used by any model
+
+```{r recipe}
+data_recipe <- recipe(premium_amount ~., data = train) %>%
+  step_date(policy_start_date, features = c("dow", "month", "year")) %>%
+  step_impute_median(all_numeric_predictors()) %>%
+  step_impute_mode(all_nominal_predictors()) %>%
+  step_log(annual_income, base = 10) %>%
+  step_normalize(all_numeric_predictors(), -policy_start_date_year) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_nzv(all_predictors()) %>%
+  step_rm(id, policy_start_date)
+```
+
+## Viewing `tidy` Data
+
+The `recipe` was implemented using `prep` and `juice` in order to visually examine the data.
+
+```{r tidy data}
+prepped_recipe <- prep(data_recipe, training = train)
+prepped_data <- juice(prepped_recipe)
+datatable(head(prepped_data, 10))
+```
+
+# Model Training
+
+In this project, three different models were trained and evaluated to determine which model would predict `premium_amount` most accurately. Below, I have provided a brief summary of these models.
+
+The first model, an elastic net regression, is a linear regression technique that incorporates L1 (lasso) and L2 (ridge) penalties to regularize a regression model. The integration of these penalties results in a model that is more robust to overfitting and multicollinearity issues.
+
+The second model, a random forest model, is a non-parametric tree-based machine learning algorithm. Through bootstrapping and the analysis of data via multiple decision trees, random forest models produce a large number of predictions before aggregating these into a final prediction. Random forest models have several key advantages, including their ability to handle high-dimensional data (i.e., datasets with large numbers of potentially collinear features) and capture interactions and non-linear relationships.
+
+The final model, an eXtreme Gradient Boosting model (XGBoost), is another non-parametric tree-based model. Like random forest models, XGBoost models are considered *ensemble* models, as both techniques utilize multiple models to generate final predictions. While random forest models involve the parallel construction of decision trees, however, XGBoost models involve the sequential construction of decision trees. Specifically, XGBoost models use a process known as *gradient boosting*, wherein a series of models are built one at a time, with each new model correcting the errors of the previous one. XGBoost models are known to be highly efficient and are generally robust to overfitting. As with random forest models, they are also capable of effectively (and "automatically") capturing feature interactions and non-linear feature-target relationships.
+
+## Specifying Models
+
+The first step in the `tidymodels` workflow involves specifying the models that will be used. Specifically, I indicated (a) what hyperparameters would be used, (b) what the underlying "engine" would be (i.e., the package being used for the model), and (c) the type of problem being solved (i.e., regression vs. classification).
+
+```{r specify}
+elastic_net_spec <- linear_reg(
+  penalty = tune(), 
+  mixture = tune()
+) %>%
+  set_engine("glmnet") %>%
+  set_mode("regression")
+
+rf_spec <- rand_forest(
+  mtry = tune(),
+  trees = tune(), # default
+  min_n = tune()
+) %>%
+  set_engine("ranger") %>%
+  set_mode("regression")
+
+xgb_spec <- boost_tree(
+  trees = tune(),
+  mtry = tune(),
+  tree_depth = tune(),
+  min_n = tune(),
+  sample_size = tune(),
+  loss_reduction = tune(),
+  learn_rate = tune()
+) %>%
+  set_engine("xgboost",
+             eval_metric = "mae") %>%
+  set_mode("regression")
+```
+
+## Creating Workflow Set
+
+To create a series of workflows, `workflow_set()` was used to combine the initial recipe with each model specification.
+
+```{r workflow}
+workflow_set <- workflow_set(
+  preproc = list(recipe = data_recipe),
+  models = list(
+    elastic = elastic_net_spec,
+    rf = rf_spec,
+    xgb = xgb_spec
+  )
+)
+```
+
+## Setting Up Cross-Validation
+
+5-fold cross-validation was used to train the three models. This is a technique that involves splitting the training data into *n* partitions. Each model is trained on *n* - 1 of the partitions and tested on the unused partition. This process is repeated such that each partition is used once for testing. Afterwards, the performance metrics for each model (i.e., those obtained from the testing data) are averaged to produce an aggregate estimate of performance. Cross-validation helps to reduce overfitting by providing multiple train-test splits during the training process and also provides a space for hyperparameter tuning. 
+
+```{r cross validation}
+set.seed(123)
+
+cv_folds <- vfold_cv(train, v = 5, strata = premium_amount) # init. folds for 5-fold cross-validation
+```
+
+## Fitting Workflow
+
+Parallel processing was used to increase the speed of the training process. The `workflow_map` function was used to map the previously defined workflow (i.e., preprocessing, training, hyperparameter tuning) of the three models. Given the computational limits of my personal computer, I used the "tune_race_anova" option for hyperparameter tuning. This is a more efficient grid searching method than a semi-random or fully random search, and produces relatively similar performances. Given the outliers and right-skewness of the distribution of our target variable, the MAE metric was selected to assess performance and guide the tuning process.
+
+```{r fit workflow}
+set.seed(123)
+
+cores <- parallel::detectCores(logical = TRUE) - 1
+
+cl <- makeCluster(cores)
+registerDoParallel(cl)
+
+results <- workflow_map(
+  workflow_set,
+  "tune_race_anova", # racing with repeated-measures ANOVA
+  resamples = cv_folds,
+  grid = 30, # semi-random grid
+  metrics = metric_set(mae, rsq),
+  control = control_race(save_pred = TRUE, parallel_over = "everything")
+)
+
+stopCluster(cl)
+```
+
+## Compare Metrics
+
+The performance metrics of the "best-performing" (defined by MAE) of each of the three types of models were plotted and compared. The best-performing (i.e., XGBoost) model was selected and saved.
+
+```{r compare metrics}
+autoplot(results,
+         select_best = TRUE) # Visualization of performance metrics
+
+rank_results(results,
+             rank_metric = "mae",
+             select_best = TRUE)
+
+best_results <-
+  results %>%
+  extract_workflow_set_result("recipe_xgb") %>%
+  select_best(metric = "mae")
+
+best_results
+```
+
+# Final Model Evaluation
+
+## Testing the Model
+
+I extracted the workflow from model training and used `last_fit()` to train and test an XGBoost model with the previously defined hyperparameters. 
+
+```{r model evaluation}
+xgb_test_results <-
+  results %>%
+  extract_workflow("recipe_xgb") %>%
+  finalize_workflow(best_results) %>%
+  last_fit(split = data_split,
+           metrics = metric_set(mae, rsq))
+
+collect_metrics(xgb_test_results)
+```
+
+## Feature Importance
+
+Lastly, I used the `DALEXtra` package to conduct permutation-based variable importance analyses. This is a "model-agnostic" method for evaluating the predictive value of features in a model. In other words, this method does not rely on the assumptions or form of any given model and can thus be used across a variety of models.
+
+```{r feature importance}
+fitted_workflow <- extract_fit_parsnip(xgb_test_results)
+
+explainer <- explain_tidymodels(
+  model = fitted_workflow,
+  data = prepped_data %>%
+    select(-premium_amount),
+  y = prepped_data$premium_amount,
+  label = "XGBoost Model"
+)
+
+loss_mae <- function(observed, predicted) {
+  mean(abs(observed - predicted))
+}
+
+attr(loss_mae, "loss_name") <- "Mean Absolute Error (MAE)"
+
+feature_importance <- model_parts(
+  explainer,
+  loss_function = loss_mae,
+  type = "difference",
+  N = NULL)
+
+feature_importance
+
+plot(feature_importance)
+```
+
+## Residual Exploration
+
+Afterwards, I created a scatterplot of the observed vs. predicted values for `premium_amount` to visualize the predictive performance of the model. In addition, I used `DALEX` and `DALEXtra` functions to examine the distribution of the residuals.
+
+```{r residuals}
+xgb_test_results %>%
+  collect_predictions %>%
+  ggplot(aes(x = premium_amount, y = .pred)) +
+  geom_point(alpha = 0.5) +
+  geom_abline(color = "grey", lty = 2) +
+  coord_obs_pred() +
+  labs(
+    title = "Observed vs. Predicted Values",
+    x = "Observed",
+    y = "Predicted"
+  )
+
+residuals <- model_performance(explainer)
+
+plot(residuals)
+plot(residuals, geom = "boxplot")
+plot(residuals, geom = "histogram")
+
+test_predictions <- xgb_test_results %>%
+  collect_predictions() %>%
+  mutate(
+    residual = premium_amount - .pred,
+    abs_residual = abs(residual)
+  )
+
+test_predictions %>%
+  ggplot(aes(x = premium_amount, y = residual)) +
+  geom_point(alpha = 0.5) +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  labs(
+    x = "Observed",
+    y = "Residual",
+    title = "Observed vs. Residual"
+  ) +
+  theme_minimal()
+
+test_predictions %>%
+  ggplot(aes(x = .pred, y = residual)) +
+  geom_point(alpha = 0.5) +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  labs(x = "Predicted", y = "Residual",
+       title = "Predicted vs. Residual") +
+  theme_minimal()
+
+```
+
+## Comparison to Baseline Performance
+
+Finally, I examined the MAE of a baseline model (i.e., predicting the mean) in order to better compare the final model.
+
+```{r baseline}
+mean_prediction <- mean(test$premium_amount, na.rm = TRUE)
+
+absolute_errors_mean <- abs(test$premium_amount - mean_prediction)
+
+baseline_mean_mae <- mean(absolute_errors_mean)
+
+baseline_mean_mae
+```
+
+
+# Results and Discussion
+
+In this project, three machine learning models were trained to predict `premium_amount`, a variable representing the insurance premiums that a given individual paid. The XGBoost model demonstrated that best predictive performance, achieving a Mean Absolute Error (MAE) of 634.38 on the testing data. While the XGBoost model was the best-performing of the three models, its R-squared value of .002 suggests that it explains only a small amount of variance more than a null model. Given that the MAE of a baseline model of predicting the mean of `premium_amount` in the testing data would be 655.13, the XGBoost model represents only a 3.16% improvement. Furthermore, an MAE of 634.38 indicates that, on average, the predictions made by the XGBoost model differed from the actual values of `premium_amount` by $634.38 dollars. As the mean of `premium_amount` in the test data was 1097.81, this represents a substantial average error.
+
+Despite the poor performance of the model, permutation-based feature importance analysis provided some ideas as to what features did provide some predictive value. Specifically, this analysis revealed that the five most important variables were `annual_income`, `health_score`, `insurance_duration`, `credit_score`, and `age`. 
+
+Lastly, examining the residuals for the predictions of the XGBoost model provided some concrete direction as to what improvements need to be made to the model. Specifically, two things became apparent: (a) the range of predicted values was relatively constricted and (b) there were certain segments of observed values characterized by systematic under- and over-prediction. More in-depth feature engineering, full use of the dataset, and ensemble stacking might represent avenues for addressing these issues.
